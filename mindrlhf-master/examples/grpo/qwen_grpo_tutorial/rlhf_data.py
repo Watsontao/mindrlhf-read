@@ -25,18 +25,22 @@ from mindspore.mindrecord import FileWriter
 from mindformers import logger
 from mindrlhf.models.qwen2_5.qwen2_5_tokenizer import Qwen2_5Tokenizer
 
+"""
+包：只要有_init_.py的文件夹都是包
+Module：一个.py文件
+Class：代码块里面的类
+"""
 
 
-# python里的数据格式
 
-##
-# list 列表  列表list[0]  list[1]   有序  可以重复  可变  []
-# dic 字典  键值对   键不可重复   {} + key: value
-# tuple 元组 不可修改的的列表  有序 可以重复 不可变       ()
-# set 集合  无序 不可以重复（自动去重） 可变   用 {} 或 set() 定义
-#
-#
-# #
+"""
+ python里的数据格式
+ 
+ list 列表  列表list[0]  list[1]   有序  可以重复  可变  []
+ dic 字典  键值对   键不可重复   {} + key: value
+ tuple 元组 不可修改的的列表  有序 可以重复 不可变       ()
+ set 集合  无序 不可以重复（自动去重） 可变   用 {} 或 set() 定义
+"""
 
 
 
@@ -54,6 +58,7 @@ def load_json_file(file_path):
         if ext == "json":
             return json.load(f)
         raise ValueError("data files should be jsonl or json")
+
 
 
 

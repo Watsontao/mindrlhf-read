@@ -55,27 +55,29 @@ class GRPOTrainer:
     def __init__(self, no_patch_tensor_shape, args=None):
         """Initialize"""
         self.args = args
-        self._set_hccl_op_expansion_mode()
-        self.grpo_config = self._init_grpo_configs(args)
-        self._init_msprobe()
-        self.tokenizer = TokenizerFactory.init_tokenizer(self.grpo_config)
-        if isinstance(self.grpo_config.rl_config.seed, int):
+        self._set_hccl_op_expansion_mode()  # 设置通信模式
+        self.grpo_config = self._init_grpo_configs(args)  #设置gpro config
+        self._init_msprobe() # 设置
+        self.tokenizer = TokenizerFactory.init_tokenizer(self.grpo_config) #　初始化tokenizer
+        if isinstance(self.grpo_config.rl_config.seed, int): #　类型检查　如果seed是int类型
             ms.set_seed(self.grpo_config.rl_config.seed)
         self._set_vllm_generation_config()
         self.no_patch_tensor_shape = no_patch_tensor_shape
-        self.tensor_writer = self._init_tensorboard()
-        setattr(self.args, "tensor_writer", self.tensor_writer)
+        self.tensor_writer = self._init_tensorboard() # 启动画图工具（TensorBoard）
+        setattr(self.args, "tensor_writer", self.tensor_writer)  # 把画笔挂到 args 上方便别人用  在运行时，给 self.args 这个对象新增一个名为 "tensor_writer" 的属性，该属性的值是 self.tensor_writer 这个对象的引用。
+
         self.host_monitor = ResourceMonitor(
             self.grpo_config.monitor_config.host_monitor_interval,
             self.grpo_config.monitor_config.host_monitor_steps,
             self.grpo_config.monitor_config.host_memory_protection,
             self.grpo_config.monitor_config.host_max_memory_threshold,
         )
+        # 启动监控
         self.host_monitor.start()
         self.reshard_optimizer = None
         if self.grpo_config.rl_config.enable_reshard_optimizer:
+            # 初始化rshard
             logger.info("GRPOTrainer: start init Reshard Optimizer")
-
             self.reshard_optimizer = reshard_optimizer.ReshardOptimizer(
                 src_parallel=reshard_optimizer.Parallel(
                     dp=self.grpo_config.actor_config.parallel_config.data_parallel,
@@ -89,12 +91,15 @@ class GRPOTrainer:
                 ),
             )
             reshard_optimizer.OPT_COMMUNICATION_GROUPS = self.reshard_optimizer.opt_communication_groups
+
+
         logger.info("GRPOTrainer: start init workers")
         self.infer = InferWorker(grpo_config=self.grpo_config, args=self.args, tokenizer=self.tokenizer)
         self.ref = get_ref_worker(grpo_config=self.grpo_config, args=self.args)
         self.train = TrainWorker(grpo_config=self.grpo_config, args=self.args)
         self.old_policy = get_old_policy_worker(grpo_config=self.grpo_config, args=self.args)
         logger.info(f"config of sft_model_config_train {self.train.sft_model_config_train}")
+        # 检查packing是否正确 根据prompt长度大小确定是否packing
         if self.grpo_config.rl_config.packing:
             if self.grpo_config.rl_config.pack_num < 1:
                 raise ValueError("pack_num must >= 1!")
@@ -106,8 +111,11 @@ class GRPOTrainer:
         self.reshard_mem_opt_level = self.grpo_config.rl_config.reshard_mem_opt_level
         if self.reshard_mem_opt_level not in [0, 1]:
             raise ValueError(f"reshard_mem_opt_level can only be 0 or 1, but got {self.reshard_mem_opt_level}")
+
+        # 如果 checkpoint 来自 HuggingFace safetensors，需要把参数名重命名成 MindSpore 能识别的格式
         if self.grpo_config.rl_config.load_ckpt_format == "hf_safetensors":
             self.rename_safetensors_weights()
+        #　动态　决定训练时能使用多少种 packing 配置
         if self.grpo_config.rl_config.dynamic_pack_level:
             self.max_pack_level = self.grpo_config.rl_config.max_pack_level
             self.min_pack_level = self.grpo_config.rl_config.min_pack_level
@@ -116,7 +124,10 @@ class GRPOTrainer:
             self.max_pack_level = 0
             self.min_pack_level = 0
             self.max_pack_num = 1
+       #　提前让 MindSpore 对模型做图编译 / 并行策略编译
         self._compile()
+
+        # 创建TransformWorker 重分片（reshard）
         self.transform = TransformWorker(
             self.grpo_config,
             self.train.sft_model_config_train,
@@ -125,12 +136,18 @@ class GRPOTrainer:
             self.ref.model(),
             self.old_policy.model(),
         )
+        #　初始化变量
         self.i_step = 0
         self.n_epoch = 0
         self.start_step, self.start_epoch = 0, 0
         self.total_time = 0
+        # 加载权重或者继续训练
         self._load_checkpoint()
+        # 初始化网络参数
         self._init_net_parameters()
+
+        # 在训练真正开始前，
+        # 先把参数从训练布局 → 推理布局 同步一次
         if not self.grpo_config.generate_config.load:
             self.transform.reshard_params(0)
 
@@ -139,7 +156,7 @@ class GRPOTrainer:
                 f"save_ckpt_interval should be lager than 0, but got "
                 f"{self.grpo_config.rl_config.save_ckpt_interval}"
             )
-        self.world_group_size = get_group_size()
+        self.world_group_size = get_group_size() # 当前参与训练的“进程总数 / 卡数”
 
         self.experience_maker = GRPOExperienceMaker(
             self.train,
@@ -152,6 +169,7 @@ class GRPOTrainer:
             self.i_step,
         )
         self.step_num = self.experience_maker.step_num
+        # print(self.experience_maker.__dict__.keys())
         if self.infer.use_vllm == VllmMode.ORIGIN:
             self.infer.grpo_model_infer.grpo_model.policy_model.model.set_train(False)
         else:
@@ -162,7 +180,7 @@ class GRPOTrainer:
         """init msprobe"""
         msprobe_config = self.grpo_config.msprobe_config
         MsProbe.config_init(msprobe_config)
-        MsProbe.save_configs(
+        MsProbe.save_configs( #b 保存当前config 方便回溯查找
             {
                 "actor": self.grpo_config.actor_config.__dict__,
                 "ref": self.grpo_config.ref_config.__dict__,
@@ -174,6 +192,13 @@ class GRPOTrainer:
 
     def _init_net_parameters(self):
         """init net parameters"""
+        """ 在mindspore或者其他静态图框架中，定义模型并不等于参数已经在设备上创建，很多参数是：
+        懒初始化（lazy）
+        在第一次 forward / compile 时才真正分配
+        如果不提前初始化，后面会OOM
+        """
+
+
         if self.infer.use_vllm != VllmMode.ORIGIN:
             self.infer.grpo_model_infer.grpo_model.policy_model.model.init_parameters_data()
         else:
@@ -184,7 +209,7 @@ class GRPOTrainer:
             self.ref.ref_model.model.init_parameters_data()
         self.train.grpo_model_train.grpo_model_train.policy_model.model.init_parameters_data()
 
-    @staticmethod
+    @staticmethod  #　static方法在init前调用
     def _set_hccl_op_expansion_mode():
         """set communication algorithm environment variables to avoid allreduce timeouts"""
         if MSContext.get_instance().get_ascend_soc_version() == "ascend910b":
@@ -203,6 +228,8 @@ class GRPOTrainer:
             self.grpo_config.rl_config.tensorboard_dir = os.path.join(
                 self.grpo_config.rl_config.tensorboard_dir, f"rank_{get_rank()}"
             )
+
+            # 真正创建并注册 TensorBoard writer（全局的）
             _set_tensorboard_writer(self.grpo_config.rl_config)
         tensor_writer = get_tensorboard_writer()
         return tensor_writer
@@ -210,10 +237,12 @@ class GRPOTrainer:
     def _set_vllm_generation_config(self):
         os.environ["MINDFORMERS_MODEL_CONFIG"] = self.grpo_config.generate_config.model_config
 
+    # 析构函数
     def __del__(self):
         if os.getenv("MINDFORMERS_MODEL_CONFIG"):
             del os.environ["MINDFORMERS_MODEL_CONFIG"]
 
+    # args > config 文件
     @staticmethod
     def _set_args_to_config(args, grpo_config: GRPOConfig):
         """set args to config"""
@@ -272,7 +301,9 @@ class GRPOTrainer:
         set_enable_old_policy(grpo_config)
         set_infer_dp_size(grpo_config)
         set_pack_level(grpo_config)
+
         grpo_config.rl_config.enable_ref = grpo_config.rl_config.beta != 0
+
         if grpo_config.generate_config.use_vllm not in range(len(VllmMode)):
             logger.warning(f"use_vllm should be 0, 1 or 2, but got {grpo_config.generate_config.use_vllm}. Reset to 0.")
             grpo_config.generate_config.use_vllm = 0
@@ -302,25 +333,27 @@ class GRPOTrainer:
         compile model
         """
         with TimeConsumingCollector("GRPOTrainer compile"):
+            #　先生成推理阶段的并行 / reshard 策略
             self.infer.generate_strategy(self.reshard_optimizer)
             origin_shape = Tensor.shape
             Tensor.shape = self.no_patch_tensor_shape
             self.ref.compile()
             self.old_policy.compile()
+            # 对每一个 pack level，都编译一套 train 图
             for i in range(self.max_pack_level + 1 - self.min_pack_level):
                 self.train.compile(i)
                 logger.info(f"train compile for pack level {i} done!")
-            Tensor.shape = origin_shape
+            Tensor.shape = origin_shape # 恢复 Tensor.shape，防止污染后续代码
 
     def _load_checkpoint(self):
         """
         load checkpoint files
         """
-        if self.args.resume_training:
+        if self.args.resume_training: # resume 训练
             epoch_step_info = self.train.reload_ckpt()
             if epoch_step_info is None:
                 raise ValueError("epoch/step info not read")
-            if self.grpo_config.ref_config.sync_ref_model:
+            if self.grpo_config.ref_config.sync_ref_model: # ref 是否与 train 同步更新，是一个配置项
                 self.ref.reload_ckpt()
             else:
                 self.ref.load_checkpoint()
@@ -328,14 +361,18 @@ class GRPOTrainer:
             self.train.offload_model()
             self.infer.offload()
             self.old_policy.offload()
+
+            # 明确哪些模型“当前在设备上”
             input_on_device_flag_dict = {
                 "policy2infer": (False, False),
                 "policy2ref": (True, True),
                 "policy2old": (False, False),
             }
+            # 第一次 reshard
             self.transform.reshard_params(0, input_on_device_flag_dict=input_on_device_flag_dict)
-            self.infer.load(skip_kv_cache=False)
 
+            # 恢复 infer，并恢复 step / epoch
+            self.infer.load(skip_kv_cache=False)
             epoch_num = epoch_step_info["epoch_num"]
             data_skip_steps = epoch_step_info["step_num"]
             if epoch_num > 0:
@@ -356,7 +393,7 @@ class GRPOTrainer:
 
     def _reshard_train_to_infer(self):
         """Reshard train model parameters to infer model."""
-        if self.reshard_mem_opt_level == 1:
+        if self.reshard_mem_opt_level == 1:  #　显存优先
             self.train.offload_model()
             if self.train.model_on_device:
                 raise RuntimeError(
@@ -388,6 +425,7 @@ class GRPOTrainer:
                 "policy2ref": (self.train.model_on_device, self.ref.on_device),
                 "policy2old": (self.train.model_on_device, self.old_policy.on_device),
             }
+
             self.transform.reshard_params(self.i_step, input_on_device_flag_dict)
             if self.reshard_mem_opt_level == 0:
                 self.ref.offload()
@@ -399,7 +437,7 @@ class GRPOTrainer:
             }
             self.transform.reshard_params(self.i_step, input_on_device_flag_dict)
 
-        if self.reshard_mem_opt_level == 0:
+        if self.reshard_mem_opt_level == 0: # 性能优先
             if not self.train.model_on_device:
                 raise RuntimeError(
                     "when reshard_mem_opt_level is equal to 0, train model must on device after transform param"
@@ -433,7 +471,7 @@ class GRPOTrainer:
         )
         np.set_printoptions(threshold=1024)
         while self.n_epoch < self.grpo_config.rl_config.epochs:
-            grpo_profiler = profiler_start(self.grpo_config.profiler_config, role="grpo_all_stage")
+            grpo_profiler = profiler_start(self.grpo_config.profiler_config, role="grpo_all_stage") # 开始记录这一整个 epoch 的 profiler 信息
             while self.i_step < self.step_num:
                 if (
                     self.grpo_config.ref_config.sync_ref_model
@@ -462,7 +500,7 @@ class GRPOTrainer:
                     with TimeConsumingCollector("load train model"):
                         self.train.load_model()
                     with TimeConsumingCollector("load accu_grads"):
-                        self.train.load_accu_grads()
+                        self.train.load_accu_grads() # 累积梯度
                     with TimeConsumingCollector("train model"):
                         update_profiler = profiler_start(
                             self.grpo_config.profiler_config, role="actor_update", profiler_iteration=self.n_epoch
@@ -483,7 +521,7 @@ class GRPOTrainer:
                     with TimeConsumingCollector("offload accu_grads"):
                         self.train.offload_accu_grads()
                     with TimeConsumingCollector("reshard train to infer"):
-                        self._reshard_train_to_infer()
+                        self._reshard_train_to_infer() # 把刚刚更新的 policy 参数，同步给 infer / ref / old_policy
                 self.total_time += perf_collector.duration
                 logger.info(
                     "step processed tokens {}, tokens/s/p {}".format(
@@ -499,12 +537,14 @@ class GRPOTrainer:
                 )
                 self.i_step += 1
                 MsProbe.step()
-                profiler_step(grpo_profiler)
+                profiler_step(grpo_profiler) #打点 profiler　打点 msprobe
             self.i_step = 0
             self.n_epoch += 1
 
         with TimeConsumingCollector("save checkpoint"):
             with TimeConsumingCollector("load train model"):
+                # 训练结束时，训练模型很可能“不在设备上”，
+                # 而 save_checkpoints() 要求模型参数必须在设备 / 内存中是可访问的完整状态。
                 self.train.load_model()
             self.train.save_checkpoints(epochs=self.grpo_config.rl_config.epochs, steps=self.step_num)
         self.host_monitor.stop()
