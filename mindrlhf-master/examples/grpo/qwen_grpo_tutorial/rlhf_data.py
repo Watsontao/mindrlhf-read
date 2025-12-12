@@ -161,19 +161,24 @@ def write_mindrecord(args):
 
     tokenizer = Qwen2_5Tokenizer(args.vocab_path, args.merges_file_path, add_bos_token=False, add_eos_token=False)
 
-    max_prompt_length = int(args.max_prompt_length)
-    seq_length = int(args.seq_length)
-    if args.pad_token_id is None:
+    max_prompt_length = int(args.max_prompt_length) # prompt长度
+    seq_length = int(args.seq_length)  # response长度
+    if args.pad_token_id is None:  # # 如果没指定填充用的 ID，就问分词器要一个默认的
         pad_token_id = tokenizer.pad_token_id
     else:
         pad_token_id = int(args.pad_token_id)
 
+    # 定义一个蓝图 以防计算机看不懂
     schema = {
-        "prompt_ids": {"type": "int64", "shape": [-1]},
-        "pretrain_ids": {"type": "int64", "shape": [-1]},
-        "loss_mask": {"type": "int64", "shape": [-1]},
+        # 第一列   shape是尺寸"shape": [10] 表示是10个数字 [-1]表示一维数组
+        "prompt_ids": {"type": "int64", "shape": [-1]},   # 存放题目ID
+        # 第二列
+        "pretrain_ids": {"type": "int64", "shape": [-1]}, # 存放答案ID
+        # 第三列
+        "loss_mask": {"type": "int64", "shape": [-1]},   # 存放打分掩码
     }
 
+    # shard_num=1 只生成一个文件
     writer = FileWriter(file_name=args.output_path, shard_num=1, overwrite=True)
     writer.add_schema(schema)
 
@@ -184,9 +189,12 @@ def write_mindrecord(args):
         except Exception as e:
             logger.error(f"Error occurred when writing sample {sample}, error: {e}")
         else:
+            # 没出错就 +1
             count += 1
+
         if args.trunc_num > 0 and count >= args.trunc_num:
             break
+
     logger.info(f"Total number of samples: {count}")
 
     writer.commit()
@@ -208,8 +216,8 @@ def get_args():
     parser.add_argument("--dataset_type", default=None, help="your dataset type?")
     parser.add_argument("--trunc_num", default=-1, type=int,
                         help="max number of samples to be written to mindrecord. -1 means all.")
-    args_opt = parser.parse_args()
-    return args_opt
+    args_opt = parser.parse_args()  # 返回一个Namespace对象，这是argparse库中自定义的一个类
+    return args_opt # arguments options
 
 
 if __name__ == "__main__":
